@@ -1,82 +1,103 @@
-# Test Case Design — Update sfputil CLI supporting operations for CPO with joint mode and Software Control
+# Test Case Design — cpoutil CLI for CPO with Software Control
 
-> **Source HLD (Community PR)**: [`SONiC PR #2317` — *Align transceiver CLIs formatting for common and platform-specific technology extensions*](https://github.com/sonic-net/SONiC/pull/2317)
-
----
-
-## 1. Test Cases
-
-> **Common terminology** used below:
->
-> - **Common CPO fields** — defined in shared maps inside `sonic-utilities` (HLD §5.2). Examples per HLD §5.5: ELS lane bias / voltage / power, CPO transceiver info labels, CPO status labels.
->   - Should test all common CPO fields on all platforms with CPO support
->   - Examples: els_bias_current_monitor<n>(n is channel number(laser)), els_voltage_monitor, etc...
-> - **VS (vendor-specific / platform-specific) fields** — supplied at runtime by the platform via `SfpBase.get_platform_specific_transceiver_info_format_map()` / `..._status_format_map()` / `..._dom_format_map()` (HLD §5.3, §5.5).
->   - Should test all VS fields only on Nvidia platforms with CPO support
->   - Examples: els_type, els_type_abbrv_name, els_hardware_rev, etc...
+> **Source HLD (Community PR)**: [`SONiC PR #2498`](https://github.com/sonic-net/SONiC/pull/2498/files)
 
 ---
 
-### TC-1 [Enhancement required] `sfputil show eeprom -p <cpo_port> -d` includes new CPO/ELS fields (common + VS)
+## 1. Background and Scope
 
-**Pre-conditions**:
+The QG plan for CPO Utils commands under CPO Baseline limits October 2026 verification to:
 
-- CPO platform with `is_joint_mode=true`; target CPO port link-up.
+- DOM field coverage through `cpoutil`.
+- Migration from `sfputil read-eeprom` to `cpoutil read-eeprom` on SimX and ASIC.
 
-**Steps**:
+**Follow-up**: Integrate community sonic-mgmt tests for the remaining `show/config/read-eeprom/write-eeprom` commands across interface/OE/ELS, assess coverage, and fill gaps.
 
-```bash
-sudo sfputil show eeprom -p <cpo_port> -d
-# assert output is parsable with expected exit code
-# assert output contains the standard CMIS DOM block (temperature, voltage, txNpower/rxNbias)
-# assert output contains the common CPO/ELS fields from the shared map
-# assert output contains the PlatformSpecificDomValues section from the platform-specific map
-# assert output contains the VS fields from the platform-specific map
-```
+**Out of scope**: STATE_DB-based `show interface transceiver` CPO support is planned with `cposhow` script. The previous transceiver EEPROM, status, and error-status cases are not part of the current coverage.
 
-### TC-2 [Enhancement required] `show interfaces transceiver eeprom -d <cpo_port>` includes new CPO/ELS fields (common + VS)
+---
 
-**Pre-conditions**: same as TC-1.
+## 2. Current Automated Coverage
 
-**Steps**:
+The source plan describes `test_cpo_cli_update.py` as containing **3 test functions / 4 pytest items**: TC-2a runs separately for OE and ELS. All automated tests are read-only.
 
-```bash
-show interfaces transceiver eeprom -d <cpo_port>        # cpo_out
-# assert output is parsable with expected exit code
-# assert output contains the standard CMIS DOM block (temperature, voltage, txNpower/rxNbias)
-# assert output contains the common CPO/ELS fields from the shared map
-# assert output contains the PlatformSpecificDomValues section from the platform-specific map
-# assert output contains the VS fields from the platform-specific map
-```
+**Common pre-conditions**:
 
-### TC-3 [Enhancement required] `show interfaces transceiver status <cpo_port>` includes new CPO status fields (common + VS)
+- CPO platform with SW control enabled, on SimX or ASIC.
+- Select a target CPO interface as `<port>`.
+- Every command in the automated cases below must succeed (`rc == 0`).
 
-**Pre-conditions**: same as TC-1.
+### TC-1: DOM output in text and JSON formats
 
 **Steps**:
 
 ```bash
-show interfaces transceiver status <cpo_port>        # cpo_out
-# assert output is parsable with expected exit code
-# assert output contains the standard CMIS status fields (cmis_state, datapath state, host lane status, etc.)
-# assert output contains the common CPO status fields from the shared map
-# assert output contains the VS status fields from the platform-specific map
+cpoutil show interface dom <port>
+cpoutil show interface dom <port> --json
 ```
 
-### TC-4 [New] `show interfaces transceiver error-status <cpo_port>` includes new CPO error strings
+**Expected results**:
 
-**Pre-conditions**: same as TC-1.
+- Both commands return `rc == 0`.
+- Output indicates module presence and contains no read errors.
+- Both formats contain the required OE/ELS fields listed below; JSON output is parseable.
+- Validation covers field presence and format, **not value correctness**.
+
+**DOM field coverage**:
+
+| Component | Required fields | Platform coverage |
+| --- | --- | --- |
+| OE | CMIS temperature, supply voltage, RX/TX power | SimX and ASIC |
+| OE | Platform-specific laser temperature and its alarm/warning thresholds | SimX and ASIC |
+| ELS | Temperature, voltage, current | SimX and ASIC |
+| ELS | Per-laser bias current, optical power, and voltage | SimX and ASIC |
+| ELS | Temperature, Vcc, TxPower, and TxBias alarm/warning thresholds | SimX and ASIC |
+| ELS | Control mode; per-laser bias-current and optical-power setpoints | SimX and ASIC |
+| ELS | Power consumption; per-laser MPD, TEC voltage, health, and TEC health | ASIC only; these field checks are skipped on SimX |
+
+### TC-2a: Full EEPROM dump for OE and ELS
+
+Run as two separate pytest items, one for each endpoint.
 
 **Steps**:
 
 ```bash
-show interfaces transceiver error-status                       # all_out  (table-form, all ports)
-# assert output is parsable with expected exit code
-# assert output contains `Error Status == OK` for all ports when no fault is injected
-show interfaces transceiver error-status <cpo_port>            # db_out
-# assert output is parsable with expected exit code
-# assert output contains `Error Status == OK` for the CPO port when no fault is injected
-show interfaces transceiver error-status -hw <cpo_port>        # hw_out
-# assert output is parsable with expected exit code
-# assert output contains `Error Status == OK` for the CPO port when no fault is injected
+cpoutil read-eeprom interface <port> --oe
+cpoutil read-eeprom interface <port> --els
 ```
+
+**Expected results**:
+
+- Each command returns `rc == 0`.
+- Output contains the EEPROM hexdump header and parseable bytes.
+- Parsed offsets include `0x00` and `0x7f`, covering the lower page.
+
+### TC-2b: Ranged EEPROM read for OE
+
+**Steps**:
+
+```bash
+# Full OE dump used as the identifier-byte reference
+cpoutil read-eeprom interface <port> --oe
+# Read 16 bytes starting at offset 0
+cpoutil read-eeprom interface <port> --oe -n 0 -o 0 -s 16
+```
+
+**Expected results**:
+
+- Both commands return `rc == 0`.
+- The ranged output contains exactly offsets 0–15.
+- Identifier byte 0 matches the corresponding byte in the full OE dump.
+
+**Coverage limits**: Other live bytes are not compared against the full dump; ELS ranged reads are not covered.
+
+---
+
+## 3. One-Time Manual Tests Only
+
+In joint mode, configuring OE or ELS separately is not supported. Perform each check once manually; these cases are **not** part of the automated pytest suite.
+
+| Case | Command | Expected result |
+| --- | --- | --- |
+| Manual-1: OE configuration | `cpoutil config oe` | Reports “unimplemented” in joint mode. |
+| Manual-2: ELS configuration | `cpoutil config els` | Reports “unimplemented” in joint mode. |
